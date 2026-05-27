@@ -13,8 +13,8 @@ import android.media.session.MediaSession
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
-import android.os.KeyEvent
 import android.os.Looper
+import android.view.KeyEvent
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
