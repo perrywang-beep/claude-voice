@@ -1,7 +1,6 @@
 package com.example.claudevoice
 
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -13,10 +12,11 @@ import android.util.Log
  * 透明语音识别 Activity。
  *
  * MIUI 不允许从后台 Service 直接调用 SpeechRecognizer，
- * 通过启动一个透明 Activity 来绕过这个限制。
+ * 通过启动透明 Activity 绕过这个限制。
  *
- * MIUI 还会让 isRecognitionAvailable() 返回 false，
- * 但实际上 Google App 的 SR 服务可以直接指定组件使用。
+ * MIUI 的 isRecognitionAvailable() 会返回 false，
+ * 但直接 createSpeechRecognizer() 仍可使用 MIUI 内置语音引擎，
+ * 所以跳过可用性检查直接创建。
  */
 class TransparentVoiceActivity : Activity() {
 
@@ -24,12 +24,6 @@ class TransparentVoiceActivity : Activity() {
         private const val TAG = "TransparentVoiceActivity"
         const val ACTION_VOICE_RESULT = "com.example.claudevoice.VOICE_RESULT"
         const val EXTRA_RESULT = "result"
-
-        // Google 语音识别服务组件（MIUI 上需要显式指定）
-        private val GOOGLE_SR_COMPONENT = ComponentName(
-            "com.google.android.googlequicksearchbox",
-            "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
-        )
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -41,20 +35,14 @@ class TransparentVoiceActivity : Activity() {
     }
 
     private fun startRecognition() {
-        // 优先用 Google SR（绕过 MIUI 的 isRecognitionAvailable=false 问题）
-        speechRecognizer = try {
-            SpeechRecognizer.createSpeechRecognizer(this, GOOGLE_SR_COMPONENT).also {
-                Log.d(TAG, "使用 Google SR 组件")
-            }
+        // 直接创建，不做 isRecognitionAvailable() 检查
+        // MIUI 该方法返回 false，但实际上 MIUI 内置引擎可以用
+        try {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         } catch (e: Exception) {
-            Log.w(TAG, "Google SR 创建失败，尝试系统默认: $e")
-            if (SpeechRecognizer.isRecognitionAvailable(this)) {
-                SpeechRecognizer.createSpeechRecognizer(this)
-            } else {
-                Log.e(TAG, "所有 SR 均不可用")
-                sendResult("")
-                return
-            }
+            Log.e(TAG, "SR 创建失败: $e")
+            sendResult("")
+            return
         }
 
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
