@@ -1,6 +1,7 @@
 package com.example.claudevoice
 
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -13,7 +14,9 @@ import android.util.Log
  *
  * MIUI 不允许从后台 Service 直接调用 SpeechRecognizer，
  * 通过启动一个透明 Activity 来绕过这个限制。
- * 识别完成后立即发广播给 VoiceService 并关闭自身。
+ *
+ * MIUI 还会让 isRecognitionAvailable() 返回 false，
+ * 但实际上 Google App 的 SR 服务可以直接指定组件使用。
  */
 class TransparentVoiceActivity : Activity() {
 
@@ -21,29 +24,42 @@ class TransparentVoiceActivity : Activity() {
         private const val TAG = "TransparentVoiceActivity"
         const val ACTION_VOICE_RESULT = "com.example.claudevoice.VOICE_RESULT"
         const val EXTRA_RESULT = "result"
+
+        // Google 语音识别服务组件（MIUI 上需要显式指定）
+        private val GOOGLE_SR_COMPONENT = ComponentName(
+            "com.google.android.googlequicksearchbox",
+            "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
+        )
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 无界面，直接开始识别
         Log.d(TAG, "启动透明 Activity，开始识别")
         startRecognition()
     }
 
     private fun startRecognition() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Log.e(TAG, "语音识别不可用")
-            sendResult("")
-            return
+        // 优先用 Google SR（绕过 MIUI 的 isRecognitionAvailable=false 问题）
+        speechRecognizer = try {
+            SpeechRecognizer.createSpeechRecognizer(this, GOOGLE_SR_COMPONENT).also {
+                Log.d(TAG, "使用 Google SR 组件")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Google SR 创建失败，尝试系统默认: $e")
+            if (SpeechRecognizer.isRecognitionAvailable(this)) {
+                SpeechRecognizer.createSpeechRecognizer(this)
+            } else {
+                Log.e(TAG, "所有 SR 均不可用")
+                sendResult("")
+                return
+            }
         }
 
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 Log.d(TAG, "SR 就绪")
-                // 通知 Service 发出"可以说话"的震动
                 sendBroadcast(Intent("com.example.claudevoice.SR_READY").apply {
                     setPackage(packageName)
                 })
@@ -72,8 +88,15 @@ class TransparentVoiceActivity : Activity() {
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
-        speechRecognizer?.startListening(intent)
+        try {
+            speechRecognizer?.startListening(intent)
+            Log.d(TAG, "SR startListening OK")
+        } catch (e: Exception) {
+            Log.e(TAG, "SR startListening 失败: $e")
+            sendResult("")
+        }
     }
 
     private fun sendResult(text: String) {
