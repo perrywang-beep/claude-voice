@@ -69,13 +69,6 @@
             android:noHistory="true"
             android:excludeFromRecents="true" />
 
-        <!-- 透明 TTS Activity（绕过 MIUI 不允许 Service 绑定 TTS 引擎的限制） -->
-        <activity
-            android:name=".TransparentTtsActivity"
-            android:theme="@style/Theme.Transparent"
-            android:exported="false"
-            android:noHistory="true"
-            android:excludeFromRecents="true" />
 
         <!-- 前台服务：常驻后台 -->
         <service

@@ -21,9 +21,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.claudevoice.Config
 import com.example.claudevoice.MainActivity
-import com.example.claudevoice.TransparentTtsActivity
 import com.example.claudevoice.TransparentVoiceActivity
 import com.example.claudevoice.api.VolcengineArkClient
+import com.example.claudevoice.audio.TtsPlayer
 import com.example.claudevoice.model.ConversationHistory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,16 +43,17 @@ class VoiceService : Service() {
     enum class State { IDLE, LISTENING, PROCESSING, PLAYING }
     @Volatile private var state = State.IDLE
 
+    private lateinit var ttsPlayer: TtsPlayer
     private val arkClient   = VolcengineArkClient()
     private val history     = ConversationHistory()
     private val scope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // 提示音 TTS 超时兜底：3 秒内 TTS 没回调就强制启动 SR
+    // 提示音超时兜底：3 秒内 TTS 没回调就直接启动 SR
     private val greetingTimeoutRunnable = Runnable {
         if (state == State.LISTENING) {
-            Log.w(TAG, "提示音 TTS 超时，直接启动 SR")
+            Log.w(TAG, "提示音超时，直接启动 SR")
             startTransparentSr()
         }
     }
@@ -63,28 +64,13 @@ class VoiceService : Service() {
                 Config.ACTION_TRIGGER_VOICE,
                 ACTION_MANUAL_TRIGGER       -> onTrigger()
                 Config.ACTION_CLEAR_CONTEXT -> onClearContext()
-
                 TransparentVoiceActivity.ACTION_VOICE_RESULT -> {
                     val text = intent.getStringExtra(TransparentVoiceActivity.EXTRA_RESULT) ?: ""
                     Log.d(TAG, "SR 结果: \"$text\"")
                     if (text.isBlank()) resetToIdle() else sendToArk(text)
                 }
                 "com.example.claudevoice.SR_READY" -> {
-                    // SR 就绪，长震动提示可以说话
                     try { vibrate(longArrayOf(0, 500)) } catch (_: Exception) {}
-                }
-                TransparentTtsActivity.ACTION_TTS_DONE -> {
-                    Log.d(TAG, "TTS 播完，state=$state")
-                    when (state) {
-                        // 提示音播完 → 开始录音
-                        State.LISTENING -> {
-                            mainHandler.removeCallbacks(greetingTimeoutRunnable)
-                            mainHandler.post { startTransparentSr() }
-                        }
-                        // 回复播完 → 回空闲
-                        State.PLAYING -> resetToIdle()
-                        else -> {}
-                    }
                 }
             }
         }
@@ -100,6 +86,7 @@ class VoiceService : Service() {
         try { startForeground(Config.NOTIFICATION_ID, buildNotification(State.IDLE)) }
         catch (e: Exception) { Log.e(TAG, "startForeground: $e") }
 
+        try { ttsPlayer = TtsPlayer(this) } catch (e: Exception) { Log.e(TAG, "TtsPlayer: $e") }
         try { acquireWakeLock() }         catch (e: Exception) { Log.e(TAG, "WakeLock: $e") }
         try { registerTriggerReceiver() } catch (e: Exception) { Log.e(TAG, "Receiver: $e") }
 
@@ -113,6 +100,7 @@ class VoiceService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         mainHandler.removeCallbacksAndMessages(null)
+        try { ttsPlayer.release() } catch (_: Exception) {}
         try { wakeLock?.release() } catch (_: Exception) {}
         try { unregisterReceiver(triggerReceiver) } catch (_: Exception) {}
         Log.d(TAG, "onDestroy")
@@ -138,26 +126,20 @@ class VoiceService : Service() {
         try { vibrate(VIB_START) } catch (_: Exception) {}
         updateNotification(State.LISTENING)
 
-        // 3 秒超时兜底，防止 TTS Activity 起不来
+        // 3 秒超时兜底
         mainHandler.postDelayed(greetingTimeoutRunnable, 3000)
 
-        // 播提示音（Activity 完成后发 ACTION_TTS_DONE，触发 startTransparentSr）
-        startTransparentTts("需要什么帮助吗")
-    }
-
-    private fun startTransparentTts(text: String) {
-        try {
-            startActivity(Intent(this, TransparentTtsActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra(TransparentTtsActivity.EXTRA_TEXT, text)
-            })
-            Log.d(TAG, "已启动 TTS Activity: $text")
-        } catch (e: Exception) {
-            Log.e(TAG, "启动 TTS Activity 失败: $e")
-            // 启动失败时，根据当前状态决定下一步
-            if (state == State.LISTENING) startTransparentSr()
-            else if (state == State.PLAYING) resetToIdle()
-        }
+        ttsPlayer.speak("需要什么帮助吗", object : TtsPlayer.Listener {
+            override fun onPlaybackFinished() {
+                mainHandler.removeCallbacks(greetingTimeoutRunnable)
+                if (state == State.LISTENING) mainHandler.post { startTransparentSr() }
+            }
+            override fun onError(msg: String) {
+                Log.w(TAG, "提示音 TTS 失败: $msg，直接启 SR")
+                mainHandler.removeCallbacks(greetingTimeoutRunnable)
+                if (state == State.LISTENING) mainHandler.post { startTransparentSr() }
+            }
+        })
     }
 
     private fun startTransparentSr() {
@@ -167,7 +149,7 @@ class VoiceService : Service() {
             })
             Log.d(TAG, "已启动 SR Activity")
         } catch (e: Exception) {
-            Log.e(TAG, "启动 SR Activity 失败: $e")
+            Log.e(TAG, "启动 SR 失败: $e")
             resetToIdle()
         }
     }
@@ -194,7 +176,13 @@ class VoiceService : Service() {
     private fun playResponse(text: String) {
         setState(State.PLAYING)
         updateNotification(State.PLAYING)
-        startTransparentTts(text)
+        ttsPlayer.speak(text, object : TtsPlayer.Listener {
+            override fun onPlaybackFinished() = resetToIdle()
+            override fun onError(msg: String) {
+                Log.w(TAG, "回复 TTS 失败: $msg")
+                resetToIdle()
+            }
+        })
     }
 
     private fun resetToIdle() {
@@ -275,7 +263,6 @@ class VoiceService : Service() {
             addAction(ACTION_MANUAL_TRIGGER)
             addAction(TransparentVoiceActivity.ACTION_VOICE_RESULT)
             addAction("com.example.claudevoice.SR_READY")
-            addAction(TransparentTtsActivity.ACTION_TTS_DONE)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(triggerReceiver, filter, RECEIVER_NOT_EXPORTED)
