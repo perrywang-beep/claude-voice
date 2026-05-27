@@ -6,12 +6,9 @@
     <!-- 麦克风录音 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- 语音识别（SpeechRecognizer） -->
-    <uses-permission android:name="android.permission.MANAGE_MEDIA" />
 
-    <!-- 前台服务（通用 + 麦克风类型，Android 14+ 要求精确类型） -->
+    <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <!-- 开机自启 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -59,15 +56,11 @@
             </intent-filter>
         </activity>
 
-        <!--
-            前台服务：常驻后台，持有麦克风资源。
-            foregroundServiceType="microphone" 是 Android 10+ 对录音类前台服务的要求。
-        -->
+        <!-- 前台服务：常驻后台 -->
         <service
             android:name=".service.VoiceService"
             android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:exported="false" />
 
         <!--
             开机自启广播接收器。

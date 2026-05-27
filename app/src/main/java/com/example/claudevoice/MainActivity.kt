@@ -66,6 +66,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // 手动测试触发（不依赖音量键和蓝牙）
+        binding.btnTest.setOnClickListener {
+            if (!isServiceRunning) {
+                Toast.makeText(this, "请先启动服务", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val intent = Intent(com.example.claudevoice.service.VoiceService.ACTION_MANUAL_TRIGGER).apply {
+                setPackage(packageName)
+            }
+            sendBroadcast(intent)
+            Toast.makeText(this, "已触发，注意震动和语音", Toast.LENGTH_SHORT).show()
+        }
+
         // 开启辅助功能
         binding.btnAccessibility.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
