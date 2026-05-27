@@ -1,0 +1,27 @@
+<resources>
+    <string name="app_name">ClaudeVoice</string>
+    <string name="accessibility_service_label">ClaudeVoice 音量键监听</string>
+    <string name="accessibility_service_description">仅用于在息屏状态下捕获音量下键长按事件，以触发与 Claude 的语音对话。不读取任何屏幕内容。</string>
+
+    <!-- 通知 -->
+    <string name="notification_channel_name">Claude 语音助手</string>
+    <string name="notification_channel_desc">保持 Claude 语音助手在后台运行</string>
+    <string name="notification_title_idle">Claude 待命中</string>
+    <string name="notification_title_recording">正在录音…</string>
+    <string name="notification_title_processing">Claude 思考中…</string>
+    <string name="notification_title_playing">Claude 回复中…</string>
+
+    <!-- MainActivity -->
+    <string name="btn_start_service">启动服务</string>
+    <string name="btn_stop_service">停止服务</string>
+    <string name="btn_open_accessibility">开启辅助功能</string>
+    <string name="btn_open_battery">省电策略设置</string>
+    <string name="status_service_running">✅ 服务运行中</string>
+    <string name="status_service_stopped">⭕ 服务未运行</string>
+    <string name="status_accessibility_on">✅ 辅助功能已开启</string>
+    <string name="status_accessibility_off">⚠️ 辅助功能未开启（音量键触发不可用）</string>
+    <string name="hint_volume_down">长按音量下键（800ms）→ 开始对话</string>
+    <string name="hint_volume_up">长按音量上键（2s）→ 清除上下文</string>
+    <string name="hint_bt_button">蓝牙耳机单击 → 开始对话</string>
+    <string name="hint_battery_xiaomi">小米/澎湃OS 用户：请在"设置→应用→ClaudeVoice→省电策略"设为"无限制"</string>
+</resources>

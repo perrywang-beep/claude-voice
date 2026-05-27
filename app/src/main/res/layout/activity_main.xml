@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1A1A1A">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <!-- 标题 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="🎙 ClaudeVoice"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="息屏语音助手"
+            android:textSize="14sp"
+            android:textColor="#AAAAAA"
+            android:layout_marginBottom="32dp" />
+
+        <!-- 服务状态 -->
+        <TextView
+            android:id="@+id/tv_service_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⭕ 服务未运行"
+            android:textSize="16sp"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <!-- 辅助功能状态 -->
+        <TextView
+            android:id="@+id/tv_accessibility_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⚠️ 辅助功能未开启"
+            android:textSize="16sp"
+            android:textColor="#FFA500"
+            android:layout_marginBottom="24dp" />
+
+        <!-- 启动/停止服务按钮 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_toggle_service"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="启动服务"
+            android:textSize="16sp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- 开启辅助功能 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_accessibility"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="开启辅助功能（音量键触发）"
+            android:textSize="14sp"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <!-- 省电策略 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_battery"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="省电策略设置（防止被杀）"
+            android:textSize="14sp"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="32dp" />
+
+        <!-- 使用说明 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="使用说明"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="• 长按音量下键 800ms → 开始录音\n• 停止说话 1.5s → 自动发送给 Claude\n• 蓝牙耳机单击 → 开始录音\n• 长按音量上键 2s → 清除对话上下文\n\n震动反馈：\n• 1次短震 → 开始录音\n• 2次短震 → 对话结束，回到待命\n• 3次短震 → 上下文已清除"
+            android:textSize="14sp"
+            android:textColor="#CCCCCC"
+            android:lineSpacingMultiplier="1.4"
+            android:layout_marginBottom="24dp" />
+
+        <!-- 小米警告 -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            app:cardBackgroundColor="#3D2B00"
+            app:cardCornerRadius="8dp"
+            xmlns:app="http://schemas.android.com/apk/res-auto">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="16dp"
+                android:text="⚠️ 小米/澎湃OS 用户\n\n请在「设置 → 应用 → ClaudeVoice → 省电策略」中设为「无限制」，否则服务会被系统杀死。"
+                android:textSize="13sp"
+                android:textColor="#FFA500"
+                android:lineSpacingMultiplier="1.4" />
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- API Key 提示 -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardBackgroundColor="#002B3D"
+            app:cardCornerRadius="8dp"
+            xmlns:app="http://schemas.android.com/apk/res-auto">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="16dp"
+                android:text="ℹ️ 配置 API Key\n\n请在 Config.kt 中填写 CLAUDE_API_KEY，然后重新编译安装。"
+                android:textSize="13sp"
+                android:textColor="#5BB8FF"
+                android:lineSpacingMultiplier="1.4" />
+        </com.google.android.material.card.MaterialCardView>
+
+    </LinearLayout>
+</ScrollView>

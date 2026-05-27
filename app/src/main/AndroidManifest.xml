@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ===== 权限声明 ===== -->
+
+    <!-- 麦克风录音 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- 语音识别（SpeechRecognizer） -->
+    <uses-permission android:name="android.permission.MANAGE_MEDIA" />
+
+    <!-- 前台服务（通用 + 麦克风类型，Android 14+ 要求精确类型） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- 开机自启 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 震动反馈 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- 蓝牙（用于耳机按键） -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- 音频路由 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- 网络（调用 Claude API） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- WakeLock：保持 CPU 唤醒以便后台处理 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+        省电策略：
+        REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 允许弹出系统对话框请求用户将 App 加入电池白名单。
+        小米澎湃 OS / MIUI 用户还需在「设置 → 应用 → ClaudeVoice → 省电策略」手动设为「无限制」，
+        否则后台服务会被系统杀死。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ClaudeVoice">
+
+        <!-- 主界面（权限申请 + 状态展示） -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            前台服务：常驻后台，持有麦克风资源。
+            foregroundServiceType="microphone" 是 Android 10+ 对录音类前台服务的要求。
+        -->
+        <service
+            android:name=".service.VoiceService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!--
+            开机自启广播接收器。
+            小米澎湃 OS 还会发送 MIUI 私有的开机广播，一并注册。
+        -->
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- 小米快速启动 -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            蓝牙耳机媒体按键接收器。
+            priority=2147483647（最大值）确保优先于系统媒体播放器拦截。
+        -->
+        <receiver
+            android:name=".receiver.HeadsetButtonReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            辅助功能服务：用于在息屏状态下捕获音量下键长按事件。
+            用户需手动在「设置 → 辅助功能 → 已下载的应用」中开启。
+        -->
+        <service
+            android:name=".accessibility.VolumeKeyService"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+</manifest>

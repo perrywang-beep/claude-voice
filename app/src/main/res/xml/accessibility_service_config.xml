@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    辅助功能服务配置。
+
+    关键标志说明：
+    - flagRequestFilterKeyEvents：允许服务拦截硬件按键（必须）
+    - accessibilityEventTypes="typeNone"：不监听 View 事件，减少性能开销
+    - canRetrieveWindowContent="false"：不需要读取屏幕内容，保护用户隐私
+
+    注意：本服务仅用于捕获音量键长按事件，不读取任何屏幕内容。
+-->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeNone"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRequestFilterKeyEvents"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100"
+    android:settingsActivity=".MainActivity" />
