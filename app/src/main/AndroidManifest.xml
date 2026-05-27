@@ -59,6 +59,14 @@
             </intent-filter>
         </activity>
 
+        <!-- 透明语音识别 Activity（绕过 MIUI 后台 SR 限制） -->
+        <activity
+            android:name=".TransparentVoiceActivity"
+            android:theme="@style/Theme.Transparent"
+            android:exported="false"
+            android:noHistory="true"
+            android:excludeFromRecents="true" />
+
         <!-- 前台服务：常驻后台 -->
         <service
             android:name=".service.VoiceService"

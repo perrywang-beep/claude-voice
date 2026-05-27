@@ -10,7 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -18,13 +17,11 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.claudevoice.Config
 import com.example.claudevoice.MainActivity
+import com.example.claudevoice.TransparentVoiceActivity
 import com.example.claudevoice.api.VolcengineArkClient
 import com.example.claudevoice.audio.AudioPlayer
 import com.example.claudevoice.model.ConversationHistory
@@ -51,15 +48,23 @@ class VoiceService : Service() {
     private val history     = ConversationHistory()
     private val scope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var speechRecognizer: SpeechRecognizer? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val triggerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Config.ACTION_TRIGGER_VOICE,
-                ACTION_MANUAL_TRIGGER       -> onTrigger()
-                Config.ACTION_CLEAR_CONTEXT -> onClearContext()
+                ACTION_MANUAL_TRIGGER        -> onTrigger()
+                Config.ACTION_CLEAR_CONTEXT  -> onClearContext()
+                TransparentVoiceActivity.ACTION_VOICE_RESULT -> {
+                    val text = intent.getStringExtra(TransparentVoiceActivity.EXTRA_RESULT) ?: ""
+                    Log.d(TAG, "收到 SR 结果: $text")
+                    if (text.isBlank()) resetToIdle() else sendToArk(text)
+                }
+                "com.example.claudevoice.SR_READY" -> {
+                    // SR 就绪，长震动提示用户开始说话
+                    try { vibrate(longArrayOf(0, 500)) } catch (_: Exception) {}
+                }
             }
         }
     }
@@ -79,7 +84,6 @@ class VoiceService : Service() {
         try { audioPlayer = AudioPlayer(this) } catch (e: Exception) { Log.e(TAG, "AudioPlayer: $e") }
         try { acquireWakeLock() }             catch (e: Exception) { Log.e(TAG, "WakeLock: $e") }
         try { registerTriggerReceiver() }     catch (e: Exception) { Log.e(TAG, "Receiver: $e") }
-        try { initSpeechRecognizer() }        catch (e: Exception) { Log.e(TAG, "STT: $e") }
 
         // 启动确认震动
         try { vibrate(VIB_START) } catch (e: Exception) { Log.e(TAG, "vibrate: $e") }
@@ -93,7 +97,6 @@ class VoiceService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        mainHandler.post { speechRecognizer?.destroy() }
         try { audioPlayer?.release() } catch (_: Exception) {}
         try { wakeLock?.release() }    catch (_: Exception) {}
         try { unregisterReceiver(triggerReceiver) } catch (_: Exception) {}
@@ -122,32 +125,27 @@ class VoiceService : Service() {
 
         // 先播提示音，再开始录音
         audioPlayer?.speak("需要什么帮助吗", object : AudioPlayer.Listener {
-            override fun onPlaybackFinished() { mainHandler.post { startSpeechRecognizer() } }
-            override fun onError(msg: String)  { mainHandler.post { startSpeechRecognizer() } }
+            override fun onPlaybackFinished() { mainHandler.post { startTransparentSr() } }
+            override fun onError(msg: String)  { mainHandler.post { startTransparentSr() } }
         }) ?: run {
             // audioPlayer 为 null 时直接开录
-            mainHandler.post { startSpeechRecognizer() }
+            mainHandler.post { startTransparentSr() }
         }
     }
 
-    private fun startSpeechRecognizer() {
-        if (speechRecognizer == null) {
-            try { initSpeechRecognizerSync() } catch (e: Exception) {
-                Log.e(TAG, "STT init: $e")
-                resetToIdle()
-                return
-            }
-        }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        }
+    /**
+     * 通过透明 Activity 启动 SpeechRecognizer。
+     * MIUI 不允许从后台 Service 直接使用 SR，Activity 上下文可以绕过这个限制。
+     */
+    private fun startTransparentSr() {
         try {
-            speechRecognizer?.startListening(intent)
-            Log.d(TAG, "startListening OK")
+            val intent = Intent(this, TransparentVoiceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            Log.d(TAG, "已启动 TransparentVoiceActivity")
         } catch (e: Exception) {
-            Log.e(TAG, "startListening: $e")
+            Log.e(TAG, "启动 TransparentVoiceActivity 失败: $e")
             resetToIdle()
         }
     }
@@ -184,48 +182,6 @@ class VoiceService : Service() {
         setState(State.IDLE)
         updateNotification(State.IDLE)
         try { vibrate(VIB_END) } catch (_: Exception) {}
-    }
-
-    // ─── SpeechRecognizer ─────────────────────────────────────────
-
-    private fun initSpeechRecognizer() {
-        mainHandler.post { initSpeechRecognizerSync() }
-    }
-
-    private fun initSpeechRecognizerSync() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Log.w(TAG, "语音识别不可用")
-            return
-        }
-        speechRecognizer?.destroy()
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).also {
-            it.setRecognitionListener(recognitionListener)
-        }
-        Log.d(TAG, "SpeechRecognizer 初始化成功")
-    }
-
-    private val recognitionListener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
-        override fun onError(error: Int) {
-            Log.e(TAG, "ASR error=$error")
-            if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                mainHandler.post { initSpeechRecognizerSync() }
-            }
-            resetToIdle()
-        }
-        override fun onResults(results: Bundle?) {
-            val text = results
-                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                ?.firstOrNull() ?: ""
-            Log.d(TAG, "识别结果: $text")
-            if (text.isBlank()) resetToIdle() else sendToArk(text)
-        }
-        override fun onPartialResults(partialResults: Bundle?) {}
-        override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
     // ─── 通知 ─────────────────────────────────────────────────────
@@ -298,6 +254,8 @@ class VoiceService : Service() {
             addAction(Config.ACTION_TRIGGER_VOICE)
             addAction(Config.ACTION_CLEAR_CONTEXT)
             addAction(ACTION_MANUAL_TRIGGER)
+            addAction(TransparentVoiceActivity.ACTION_VOICE_RESULT)
+            addAction("com.example.claudevoice.SR_READY")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(triggerReceiver, filter, RECEIVER_NOT_EXPORTED)
