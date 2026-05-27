@@ -29,7 +29,13 @@ import com.example.claudevoice.service.VoiceService
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private var isServiceRunning = false
+    private val isServiceRunning: Boolean
+        get() {
+            val manager = getSystemService(android.app.ActivityManager::class.java)
+            @Suppress("DEPRECATION")
+            return manager.getRunningServices(Int.MAX_VALUE)
+                .any { it.service.className == com.example.claudevoice.service.VoiceService::class.java.name }
+        }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -115,7 +121,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionsAndStart() {
-        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
 
         val allGranted = permissions.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
@@ -135,15 +145,14 @@ class MainActivity : AppCompatActivity() {
         } else {
             startService(intent)
         }
-        isServiceRunning = true
-        updateServiceStatus()
-        Toast.makeText(this, "Claude 待命中，可以息屏了", Toast.LENGTH_SHORT).show()
+        // 延迟 500ms 再刷新状态，等服务启动
+        binding.root.postDelayed({ updateServiceStatus() }, 500)
+        Toast.makeText(this, "启动中…", Toast.LENGTH_SHORT).show()
     }
 
     private fun stopVoiceService() {
         stopService(Intent(this, VoiceService::class.java))
-        isServiceRunning = false
-        updateServiceStatus()
+        binding.root.postDelayed({ updateServiceStatus() }, 300)
     }
 
     private fun updateServiceStatus() {

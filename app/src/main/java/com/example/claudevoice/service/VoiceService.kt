@@ -9,9 +9,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.media.AudioManager
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -25,7 +22,6 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
-import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import com.example.claudevoice.Config
 import com.example.claudevoice.MainActivity
@@ -37,23 +33,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-/**
- * 常驻前台服务。
- *
- * 触发方式：
- *   1. 音量下键长按（AccessibilityService）
- *   2. 蓝牙耳机按键（MediaSession 回调）
- *   3. MainActivity 手动测试按钮
- *
- * 状态机：IDLE → LISTENING → PROCESSING → PLAYING → IDLE
- */
 class VoiceService : Service() {
 
     companion object {
         private const val TAG = "VoiceService"
-
         const val ACTION_MANUAL_TRIGGER = "com.example.claudevoice.MANUAL_TRIGGER"
-
         private val VIB_START = longArrayOf(0, 100)
         private val VIB_END   = longArrayOf(0, 100, 100, 100)
         private val VIB_CLEAR = longArrayOf(0, 100, 100, 100, 100, 100)
@@ -62,24 +46,19 @@ class VoiceService : Service() {
     enum class State { IDLE, LISTENING, PROCESSING, PLAYING }
     @Volatile private var state = State.IDLE
 
-    private lateinit var audioPlayer: AudioPlayer
+    private var audioPlayer: AudioPlayer? = null
     private val arkClient   = VolcengineArkClient()
     private val history     = ConversationHistory()
     private val scope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
-
-    private lateinit var vibrator: Vibrator
-    private var wakeLock: PowerManager.WakeLock? = null
     private var speechRecognizer: SpeechRecognizer? = null
-    private var mediaSession: MediaSession? = null
-
-    // ─── 广播接收器（音量键 / 手动触发） ─────────────────────────
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private val triggerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Config.ACTION_TRIGGER_VOICE,
-                ACTION_MANUAL_TRIGGER     -> onTrigger()
+                ACTION_MANUAL_TRIGGER       -> onTrigger()
                 Config.ACTION_CLEAR_CONTEXT -> onClearContext()
             }
         }
@@ -89,21 +68,23 @@ class VoiceService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "服务创建")
+        Log.d(TAG, "onCreate")
 
-        audioPlayer = AudioPlayer(this)
-        vibrator    = getVibrator()
+        // 第一步：先把通知起来，这样即使后面崩溃也不会 ANR
+        try { createNotificationChannel() } catch (e: Exception) { Log.e(TAG, "channel: $e") }
+        try { startForeground(Config.NOTIFICATION_ID, buildNotification(State.IDLE)) }
+        catch (e: Exception) { Log.e(TAG, "startForeground: $e") }
 
-        createNotificationChannel()
-        startForeground(Config.NOTIFICATION_ID, buildNotification(State.IDLE))
+        // 第二步：其他初始化
+        try { audioPlayer = AudioPlayer(this) } catch (e: Exception) { Log.e(TAG, "AudioPlayer: $e") }
+        try { acquireWakeLock() }             catch (e: Exception) { Log.e(TAG, "WakeLock: $e") }
+        try { registerTriggerReceiver() }     catch (e: Exception) { Log.e(TAG, "Receiver: $e") }
+        try { initSpeechRecognizer() }        catch (e: Exception) { Log.e(TAG, "STT: $e") }
 
-        acquireWakeLock()
-        registerTriggerReceiver()
-        initSpeechRecognizer()
-        setupMediaSession()      // ← 蓝牙耳机支持
+        // 启动确认震动
+        try { vibrate(VIB_START) } catch (e: Exception) { Log.e(TAG, "vibrate: $e") }
 
-        // 启动时震动一次，确认服务已启动
-        vibrate(VIB_START)
+        Log.d(TAG, "onCreate 完成")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -112,116 +93,61 @@ class VoiceService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        mediaSession?.release()
-        mediaSession = null
         mainHandler.post { speechRecognizer?.destroy() }
-        audioPlayer.release()
-        wakeLock?.release()
+        try { audioPlayer?.release() } catch (_: Exception) {}
+        try { wakeLock?.release() }    catch (_: Exception) {}
         try { unregisterReceiver(triggerReceiver) } catch (_: Exception) {}
-        Log.d(TAG, "服务销毁")
+        Log.d(TAG, "onDestroy")
     }
 
-    // ─── MediaSession（蓝牙耳机按键） ────────────────────────────
-
-    /**
-     * 注册 MediaSession 使 App 成为"活跃媒体应用"。
-     * 现代 TWS 耳机（AirPods、OPPO Enco 等）通过 MediaSession 路由按键事件，
-     * 而不发送旧版 ACTION_MEDIA_BUTTON 广播。
-     */
-    private fun setupMediaSession() {
-        mediaSession = MediaSession(this, "ClaudeVoice").apply {
-            setCallback(object : MediaSession.Callback() {
-                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
-                    val event: KeyEvent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
-                    }
-
-                    Log.d(TAG, "MediaSession 按键: ${event?.keyCode} action=${event?.action}")
-
-                    if (event?.action == KeyEvent.ACTION_DOWN) {
-                        when (event.keyCode) {
-                            KeyEvent.KEYCODE_HEADSETHOOK,
-                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                                onTrigger()
-                                return true
-                            }
-                        }
-                    }
-                    return false
-                }
-            })
-
-            // 设置 PlaybackState，让系统认为这是活跃的媒体 App
-            val state = PlaybackState.Builder()
-                .setActions(PlaybackState.ACTION_PLAY_PAUSE)
-                .setState(PlaybackState.STATE_PAUSED, 0, 1.0f)
-                .build()
-            setPlaybackState(state)
-
-            isActive = true
-        }
-
-        // 向系统注册为媒体按键监听者
-        val audioManager = getSystemService(AudioManager::class.java)
-        audioManager.registerMediaButtonEventReceiver(
-            android.content.ComponentName(this, com.example.claudevoice.receiver.HeadsetButtonReceiver::class.java)
-        )
-
-        Log.d(TAG, "MediaSession 已激活")
-    }
-
-    // ─── 触发入口 ─────────────────────────────────────────────────
+    // ─── 触发 ─────────────────────────────────────────────────────
 
     fun onTrigger() {
-        if (state != State.IDLE) {
-            Log.d(TAG, "当前状态 $state，忽略")
-            return
-        }
+        Log.d(TAG, "onTrigger, state=$state")
+        if (state != State.IDLE) return
         startListening()
     }
 
     private fun onClearContext() {
         history.clear()
-        vibrate(VIB_CLEAR)
-        Log.d(TAG, "上下文已清除")
+        try { vibrate(VIB_CLEAR) } catch (_: Exception) {}
     }
 
     // ─── 状态机 ───────────────────────────────────────────────────
 
     private fun startListening() {
         setState(State.LISTENING)
-        vibrate(VIB_START)
+        try { vibrate(VIB_START) } catch (_: Exception) {}
         updateNotification(State.LISTENING)
 
-        // 先播报提示语，播完再开始录音
-        audioPlayer.speak("需要什么帮助吗", object : AudioPlayer.Listener {
-            override fun onPlaybackFinished() {
-                mainHandler.post { startSpeechRecognizer() }
-            }
-            override fun onError(msg: String) {
-                // TTS 失败也继续录音
-                mainHandler.post { startSpeechRecognizer() }
-            }
-        })
+        // 先播提示音，再开始录音
+        audioPlayer?.speak("需要什么帮助吗", object : AudioPlayer.Listener {
+            override fun onPlaybackFinished() { mainHandler.post { startSpeechRecognizer() } }
+            override fun onError(msg: String)  { mainHandler.post { startSpeechRecognizer() } }
+        }) ?: run {
+            // audioPlayer 为 null 时直接开录
+            mainHandler.post { startSpeechRecognizer() }
+        }
     }
 
     private fun startSpeechRecognizer() {
-        if (speechRecognizer == null) initSpeechRecognizerSync()
-
+        if (speechRecognizer == null) {
+            try { initSpeechRecognizerSync() } catch (e: Exception) {
+                Log.e(TAG, "STT init: $e")
+                resetToIdle()
+                return
+            }
+        }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
         }
         try {
             speechRecognizer?.startListening(intent)
-            Log.d(TAG, "开始监听")
+            Log.d(TAG, "startListening OK")
         } catch (e: Exception) {
-            Log.e(TAG, "startListening 失败: ${e.message}")
+            Log.e(TAG, "startListening: $e")
             resetToIdle()
         }
     }
@@ -229,7 +155,6 @@ class VoiceService : Service() {
     private fun sendToArk(userText: String) {
         setState(State.PROCESSING)
         updateNotification(State.PROCESSING)
-
         scope.launch {
             arkClient.chat(userText, history, object : VolcengineArkClient.StreamListener {
                 override fun onToken(token: String) {}
@@ -239,7 +164,7 @@ class VoiceService : Service() {
                     playResponse(fullText)
                 }
                 override fun onError(message: String) {
-                    Log.e(TAG, "ARK 错误: $message")
+                    Log.e(TAG, "ARK: $message")
                     resetToIdle()
                 }
             })
@@ -249,17 +174,16 @@ class VoiceService : Service() {
     private fun playResponse(text: String) {
         setState(State.PLAYING)
         updateNotification(State.PLAYING)
-
-        audioPlayer.speak(text, object : AudioPlayer.Listener {
+        audioPlayer?.speak(text, object : AudioPlayer.Listener {
             override fun onPlaybackFinished() = resetToIdle()
-            override fun onError(msg: String) { resetToIdle() }
-        })
+            override fun onError(msg: String)  = resetToIdle()
+        }) ?: resetToIdle()
     }
 
     private fun resetToIdle() {
         setState(State.IDLE)
         updateNotification(State.IDLE)
-        vibrate(VIB_END)
+        try { vibrate(VIB_END) } catch (_: Exception) {}
     }
 
     // ─── SpeechRecognizer ─────────────────────────────────────────
@@ -270,11 +194,14 @@ class VoiceService : Service() {
 
     private fun initSpeechRecognizerSync() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Log.w(TAG, "设备不支持语音识别")
+            Log.w(TAG, "语音识别不可用")
             return
         }
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        speechRecognizer?.setRecognitionListener(recognitionListener)
+        speechRecognizer?.destroy()
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).also {
+            it.setRecognitionListener(recognitionListener)
+        }
+        Log.d(TAG, "SpeechRecognizer 初始化成功")
     }
 
     private val recognitionListener = object : RecognitionListener {
@@ -284,13 +211,9 @@ class VoiceService : Service() {
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
-            Log.e(TAG, "ASR 错误码: $error")
+            Log.e(TAG, "ASR error=$error")
             if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                mainHandler.post {
-                    speechRecognizer?.destroy()
-                    speechRecognizer = null
-                    initSpeechRecognizerSync()
-                }
+                mainHandler.post { initSpeechRecognizerSync() }
             }
             resetToIdle()
         }
@@ -324,32 +247,30 @@ class VoiceService : Service() {
             State.PROCESSING -> "🤔 思考中…"
             State.PLAYING    -> "🔊 回复中…"
         }
-
-        // 点击通知主体 → 打开 MainActivity
-        val openAppPi = PendingIntent.getActivity(
+        val openPi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
-
-        // 通知栏「开始」按钮 → 直接触发语音
-        val triggerIntent = Intent(ACTION_MANUAL_TRIGGER).apply { setPackage(packageName) }
         val triggerPi = PendingIntent.getBroadcast(
-            this, 1, triggerIntent,
+            this, 1,
+            Intent(ACTION_MANUAL_TRIGGER).apply { setPackage(packageName) },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         return NotificationCompat.Builder(this, Config.NOTIFICATION_CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(if (s == State.IDLE) "点「开始」或长按音量下键" else "")
+            .setContentText(if (s == State.IDLE) "点「开始」触发对话" else "")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
-            .setContentIntent(openAppPi)
+            .setContentIntent(openPi)
             .addAction(android.R.drawable.ic_btn_speak_now, "🎙 开始", triggerPi)
-            .setPriority(NotificationCompat.PRIORITY_LOW).build()
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
     }
 
     private fun updateNotification(s: State) {
-        getSystemService(NotificationManager::class.java)
-            .notify(Config.NOTIFICATION_ID, buildNotification(s))
+        try {
+            getSystemService(NotificationManager::class.java)
+                .notify(Config.NOTIFICATION_ID, buildNotification(s))
+        } catch (_: Exception) {}
     }
 
     // ─── 工具 ─────────────────────────────────────────────────────
@@ -362,7 +283,7 @@ class VoiceService : Service() {
                 .defaultVibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
         } else {
             @Suppress("DEPRECATION")
-            vibrator.vibrate(pattern, -1)
+            getSystemService(Vibrator::class.java).vibrate(pattern, -1)
         }
     }
 
@@ -384,9 +305,4 @@ class VoiceService : Service() {
             registerReceiver(triggerReceiver, filter)
         }
     }
-
-    private fun getVibrator(): Vibrator =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-            getSystemService(VibratorManager::class.java).defaultVibrator
-        else @Suppress("DEPRECATION") getSystemService(Vibrator::class.java)
 }
