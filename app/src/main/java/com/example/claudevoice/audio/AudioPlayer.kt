@@ -12,6 +12,12 @@ class AudioPlayer(private val context: Context) {
 
     companion object {
         private const val TAG = "AudioPlayer"
+        // TTS 引擎优先级列表（null = 系统默认）
+        private val TTS_ENGINES = listOf(
+            "com.google.android.tts",       // Google TTS
+            "com.xiaomi.mibrain.speech",    // 小米语音
+            null                            // 系统默认兜底
+        )
     }
 
     interface Listener {
@@ -21,18 +27,31 @@ class AudioPlayer(private val context: Context) {
 
     private var tts: TextToSpeech? = null
     private var isInitialized = false
-    private var ttsInitFailed = false   // TTS 引擎初始化彻底失败（MIUI 常见）
+    private var ttsInitFailed = false
     private var pendingText: String? = null
     private var pendingListener: Listener? = null
+    private var engineIndex = 0
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     init {
-        initTts()
+        tryNextEngine()
     }
 
-    private fun initTts() {
-        tts = TextToSpeech(context) { status ->
+    private fun tryNextEngine() {
+        if (engineIndex >= TTS_ENGINES.size) {
+            Log.e(TAG, "所有 TTS 引擎均失败")
+            ttsInitFailed = true
+            pendingListener?.onError("TTS 不可用")
+            pendingListener = null
+            pendingText = null
+            return
+        }
+
+        val engine = TTS_ENGINES[engineIndex++]
+        Log.d(TAG, "尝试 TTS 引擎: ${engine ?: "系统默认"}")
+
+        val initListener = TextToSpeech.OnInitListener { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val result = tts?.setLanguage(Locale.SIMPLIFIED_CHINESE)
                 if (result == TextToSpeech.LANG_MISSING_DATA ||
@@ -41,7 +60,6 @@ class AudioPlayer(private val context: Context) {
                 }
                 tts?.setSpeechRate(1.0f)
                 tts?.setPitch(1.0f)
-
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
                     override fun onDone(utteranceId: String?) {
@@ -51,58 +69,51 @@ class AudioPlayer(private val context: Context) {
                     }
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) {
-                        Log.e(TAG, "TTS 错误")
-                        pendingListener?.onError("TTS 失败")
+                        Log.e(TAG, "TTS 播放错误")
+                        pendingListener?.onError("TTS 播放失败")
                         pendingListener = null
                     }
                 })
-
                 isInitialized = true
-                Log.d(TAG, "TTS 初始化成功")
-
-                // 如果 speak() 在初始化前被调用，现在补上
-                val t = pendingText
-                val l = pendingListener
+                Log.d(TAG, "TTS 引擎初始化成功: ${engine ?: "系统默认"}")
+                // 补上在初始化前排队的 speak 请求
+                val t = pendingText; val l = pendingListener
                 if (t != null && l != null) {
-                    pendingText = null
-                    pendingListener = null
+                    pendingText = null; pendingListener = null
                     speak(t, l)
                 }
             } else {
-                Log.e(TAG, "TTS 初始化失败 status=$status")
-                ttsInitFailed = true
-                // 把排队的 listener 立刻通知失败，让调用方继续走流程
-                pendingListener?.onError("TTS 初始化失败")
-                pendingListener = null
-                pendingText = null
+                Log.w(TAG, "TTS 引擎失败 status=$status: ${engine ?: "系统默认"}，换下一个")
+                tts?.shutdown(); tts = null
+                tryNextEngine()
             }
+        }
+
+        tts = if (engine != null) {
+            TextToSpeech(context, initListener, engine)
+        } else {
+            TextToSpeech(context, initListener)
         }
     }
 
     fun speak(text: String, listener: Listener) {
-        // TTS 已经确认初始化失败，直接回调 onError
         if (ttsInitFailed) {
-            Log.w(TAG, "TTS 已失败，跳过播报")
+            Log.w(TAG, "TTS 不可用，跳过播报")
             listener.onError("TTS 不可用")
             return
         }
-
         if (!isInitialized) {
-            // 还在初始化中，排队等待
-            pendingText     = text
+            pendingText = text
             pendingListener = listener
             return
         }
 
         pendingListener = listener
 
-        // 确保媒体音量不为 0
         val stream = AudioManager.STREAM_MUSIC
         val maxVol = audioManager.getStreamMaxVolume(stream)
         val curVol = audioManager.getStreamVolume(stream)
-        if (curVol == 0) {
-            audioManager.setStreamVolume(stream, maxVol / 2, 0)
-        }
+        if (curVol == 0) audioManager.setStreamVolume(stream, maxVol / 2, 0)
 
         val params = android.os.Bundle().apply {
             putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
@@ -112,9 +123,7 @@ class AudioPlayer(private val context: Context) {
         Log.d(TAG, "TTS speak: $text")
     }
 
-    fun stop() {
-        tts?.stop()
-    }
+    fun stop() { tts?.stop() }
 
     fun release() {
         tts?.stop()
