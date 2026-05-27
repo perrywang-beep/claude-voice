@@ -49,6 +49,6 @@ object Config {
     const val TTS_APP_ID  = "7696822959"
     const val TTS_TOKEN   = "PDlZu0111x_8YhbchuPjvnQBwjnFhSJ0"
     const val TTS_CLUSTER = "volcano_tts"
-    const val TTS_VOICE   = "zh_female_tianmei_saas"
+    const val TTS_VOICE   = "BV001_streaming"   // 标准女声，免费
     const val TTS_URL     = "https://openspeech.bytedance.com/api/v1/tts"
 }
