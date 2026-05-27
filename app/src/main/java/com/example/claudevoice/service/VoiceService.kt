@@ -324,14 +324,26 @@ class VoiceService : Service() {
             State.PROCESSING -> "🤔 思考中…"
             State.PLAYING    -> "🔊 回复中…"
         }
-        val pi = PendingIntent.getActivity(
+
+        // 点击通知主体 → 打开 MainActivity
+        val openAppPi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
+
+        // 通知栏「开始」按钮 → 直接触发语音
+        val triggerIntent = Intent(ACTION_MANUAL_TRIGGER).apply { setPackage(packageName) }
+        val triggerPi = PendingIntent.getBroadcast(
+            this, 1, triggerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return NotificationCompat.Builder(this, Config.NOTIFICATION_CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText("长按音量下键 · 耳机按键 · 点击通知")
+            .setContentText(if (s == State.IDLE) "点「开始」或长按音量下键" else "")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true).setContentIntent(pi)
+            .setOngoing(true)
+            .setContentIntent(openAppPi)
+            .addAction(android.R.drawable.ic_btn_speak_now, "🎙 开始", triggerPi)
             .setPriority(NotificationCompat.PRIORITY_LOW).build()
     }
 
