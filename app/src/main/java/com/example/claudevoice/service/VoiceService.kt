@@ -9,9 +9,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.session.MediaSession
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
+import android.os.KeyEvent
 import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
@@ -45,6 +47,7 @@ class VoiceService : Service() {
 
     private lateinit var ttsPlayer: TtsPlayer
     private val arkClient   = VolcengineArkClient()
+    private var mediaSession: MediaSession? = null
     private val history     = ConversationHistory()
     private val scope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -95,6 +98,7 @@ class VoiceService : Service() {
         try { ttsPlayer = TtsPlayer(this) } catch (e: Exception) { Log.e(TAG, "TtsPlayer: $e") }
         try { acquireWakeLock() }         catch (e: Exception) { Log.e(TAG, "WakeLock: $e") }
         try { registerTriggerReceiver() } catch (e: Exception) { Log.e(TAG, "Receiver: $e") }
+        try { setupMediaSession() }       catch (e: Exception) { Log.e(TAG, "MediaSession: $e") }
 
         try { vibrate(VIB_START) } catch (e: Exception) { Log.e(TAG, "vibrate: $e") }
         Log.d(TAG, "onCreate 完成")
@@ -106,9 +110,10 @@ class VoiceService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         mainHandler.removeCallbacksAndMessages(null)
-        try { ttsPlayer.release() } catch (_: Exception) {}
-        try { wakeLock?.release() } catch (_: Exception) {}
+        try { ttsPlayer.release() }               catch (_: Exception) {}
+        try { wakeLock?.release() }               catch (_: Exception) {}
         try { unregisterReceiver(triggerReceiver) } catch (_: Exception) {}
+        try { mediaSession?.release() }           catch (_: Exception) {}
         Log.d(TAG, "onDestroy")
     }
 
@@ -286,6 +291,37 @@ class VoiceService : Service() {
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ClaudeVoice:WakeLock")
             .also { it.acquire(12 * 60 * 60 * 1000L) }
+    }
+
+    private fun setupMediaSession() {
+        mediaSession = MediaSession(this, "VoiceService").apply {
+            setCallback(object : MediaSession.Callback() {
+                override fun onMediaButtonEvent(intent: Intent): Boolean {
+                    @Suppress("DEPRECATION")
+                    val event = intent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                        ?: return false
+                    val code = event.keyCode
+                    Log.d(TAG, "MediaSession 按键: keyCode=$code action=${event.action}")
+                    if (event.action == KeyEvent.ACTION_UP &&
+                        (code == KeyEvent.KEYCODE_HEADSETHOOK ||
+                         code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
+                         code == KeyEvent.KEYCODE_MEDIA_NEXT ||
+                         code == KeyEvent.KEYCODE_MEDIA_PREVIOUS)) {
+                        Log.d(TAG, "耳机键触发")
+                        mainHandler.post { onTrigger() }
+                        return true
+                    }
+                    return false
+                }
+            })
+            @Suppress("DEPRECATION")
+            setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
+            isActive = true
+        }
+        Log.d(TAG, "MediaSession 已激活")
     }
 
     private fun registerTriggerReceiver() {
