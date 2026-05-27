@@ -1,8 +1,12 @@
 package com.example.claudevoice
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -20,6 +24,7 @@ class TransparentVoiceActivity : Activity() {
     companion object {
         private const val TAG = "TransparentVoiceActivity"
         const val ACTION_VOICE_RESULT = "com.example.claudevoice.VOICE_RESULT"
+        const val ACTION_CANCEL_SR    = "com.example.claudevoice.CANCEL_SR"
         const val EXTRA_RESULT = "result"
         private const val REQ_SPEECH = 101
 
@@ -31,6 +36,7 @@ class TransparentVoiceActivity : Activity() {
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var strategyIndex = 0          // 当前正在尝试哪个方案
+    private var cancelReceiver: BroadcastReceiver? = null
 
     // 每个方案：lambda 返回 SpeechRecognizer，null 表示跳过
     private val srFactories: List<() -> SpeechRecognizer?> = listOf(
@@ -59,7 +65,25 @@ class TransparentVoiceActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "启动")
+        registerCancelReceiver()
         tryNextSrStrategy()
+    }
+
+    private fun registerCancelReceiver() {
+        cancelReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                Log.d(TAG, "收到 CANCEL_SR，终止识别")
+                speechRecognizer?.destroy()
+                speechRecognizer = null
+                finish()   // 不发 VOICE_RESULT，VoiceService 自行重启 SR
+            }
+        }
+        val filter = IntentFilter(ACTION_CANCEL_SR)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(cancelReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(cancelReceiver, filter)
+        }
     }
 
     // ── 方案切换核心逻辑 ──────────────────────────────────────────
@@ -151,6 +175,8 @@ class TransparentVoiceActivity : Activity() {
     }
 
     override fun onDestroy() {
+        try { cancelReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
+        cancelReceiver = null
         speechRecognizer?.destroy()
         speechRecognizer = null
         super.onDestroy()

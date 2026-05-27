@@ -44,6 +44,8 @@ class VoiceService : Service() {
 
     enum class State { IDLE, LISTENING, PROCESSING, PLAYING }
     @Volatile private var state = State.IDLE
+    // 每次 startListening() 递增，用于作废旧的 TTS 回调，防止重复启动 SR
+    @Volatile private var srGeneration = 0
 
     private lateinit var ttsPlayer: TtsPlayer
     private val arkClient   = VolcengineArkClient()
@@ -123,16 +125,35 @@ class VoiceService : Service() {
         Log.d(TAG, "onTrigger, state=$state")
         when (state) {
             State.IDLE -> startListening()
+
             State.PLAYING -> {
-                // 打断：立刻停 TTS，重新开始（带提示音）
-                Log.d(TAG, "打断 TTS，重新开始")
+                // 打断 TTS → 直接开始监听，不播提示音
+                Log.d(TAG, "打断 TTS，跳过提示音直接监听")
                 ttsPlayer.stop()
-                setState(State.IDLE)
-                startListening()
+                srGeneration++      // 作废 continueListening 可能残留的回调
+                setState(State.LISTENING)
+                updateNotification(State.LISTENING)
+                try { vibrate(VIB_START) } catch (_: Exception) {}
+                mainHandler.post { startTransparentSr() }
             }
-            State.LISTENING, State.PROCESSING -> {
-                // 已在进行中，忽略
-                Log.d(TAG, "忽略触发，当前 state=$state")
+
+            State.LISTENING -> {
+                // 打断提示音或正在进行的 SR → 取消旧 SR，立刻重新监听
+                Log.d(TAG, "打断 LISTENING，取消旧 SR 并重新监听")
+                ttsPlayer.stop()
+                mainHandler.removeCallbacks(greetingTimeoutRunnable)
+                srGeneration++      // 作废旧 TTS 回调（startListening 捕获的 myGen 会失配）
+                sendBroadcast(Intent(TransparentVoiceActivity.ACTION_CANCEL_SR)
+                    .apply { setPackage(packageName) })
+                setState(State.LISTENING)
+                updateNotification(State.LISTENING)
+                try { vibrate(VIB_START) } catch (_: Exception) {}
+                mainHandler.post { startTransparentSr() }
+            }
+
+            State.PROCESSING -> {
+                // LLM 请求中，忽略（暂不支持打断）
+                Log.d(TAG, "PROCESSING 中，忽略触发")
             }
         }
     }
@@ -147,6 +168,7 @@ class VoiceService : Service() {
 
     /** 首次触发：播提示音再监听 */
     private fun startListening() {
+        val myGen = ++srGeneration      // 捕获本次会话编号
         setState(State.LISTENING)
         try { vibrate(VIB_START) } catch (_: Exception) {}
         updateNotification(State.LISTENING)
@@ -156,12 +178,17 @@ class VoiceService : Service() {
         ttsPlayer.speak("需要什么帮助吗", object : TtsPlayer.Listener {
             override fun onPlaybackFinished() {
                 mainHandler.removeCallbacks(greetingTimeoutRunnable)
-                if (state == State.LISTENING) mainHandler.post { startTransparentSr() }
+                // 只有当会话未被中断时才启动 SR
+                mainHandler.post {
+                    if (state == State.LISTENING && srGeneration == myGen) startTransparentSr()
+                }
             }
             override fun onError(msg: String) {
                 Log.w(TAG, "提示音失败: $msg")
                 mainHandler.removeCallbacks(greetingTimeoutRunnable)
-                if (state == State.LISTENING) mainHandler.post { startTransparentSr() }
+                mainHandler.post {
+                    if (state == State.LISTENING && srGeneration == myGen) startTransparentSr()
+                }
             }
         })
     }
@@ -305,6 +332,7 @@ class VoiceService : Service() {
                     if (event.action == KeyEvent.ACTION_UP &&
                         (code == KeyEvent.KEYCODE_HEADSETHOOK ||
                          code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
+                         code == KeyEvent.KEYCODE_MEDIA_PLAY ||      // OPPO Enco X2 发 126
                          code == KeyEvent.KEYCODE_MEDIA_NEXT ||
                          code == KeyEvent.KEYCODE_MEDIA_PREVIOUS)) {
                         Log.d(TAG, "耳机键触发")
