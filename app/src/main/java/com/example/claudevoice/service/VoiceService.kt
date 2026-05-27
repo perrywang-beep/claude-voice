@@ -42,6 +42,7 @@ class VoiceService : Service() {
 
     enum class State { IDLE, LISTENING, PROCESSING, PLAYING }
     @Volatile private var state = State.IDLE
+    @Volatile private var srPending = false   // TTS 超时兜底标志
 
     private var audioPlayer: AudioPlayer? = null
     private val arkClient   = VolcengineArkClient()
@@ -123,12 +124,29 @@ class VoiceService : Service() {
         try { vibrate(VIB_START) } catch (_: Exception) {}
         updateNotification(State.LISTENING)
 
+        srPending = true
+
+        // 3 秒超时兜底：TTS 无论成功/失败/挂起，最多等 3 秒后强制启动 SR
+        mainHandler.postDelayed({
+            if (srPending) {
+                Log.w(TAG, "TTS 超时，直接启动 SR")
+                srPending = false
+                startTransparentSr()
+            }
+        }, 3000)
+
         // 先播提示音，再开始录音
         audioPlayer?.speak("需要什么帮助吗", object : AudioPlayer.Listener {
-            override fun onPlaybackFinished() { mainHandler.post { startTransparentSr() } }
-            override fun onError(msg: String)  { mainHandler.post { startTransparentSr() } }
+            override fun onPlaybackFinished() {
+                if (srPending) { srPending = false; mainHandler.post { startTransparentSr() } }
+            }
+            override fun onError(msg: String) {
+                if (srPending) { srPending = false; mainHandler.post { startTransparentSr() } }
+            }
         }) ?: run {
             // audioPlayer 为 null 时直接开录
+            srPending = false
+            mainHandler.removeCallbacksAndMessages(null)
             mainHandler.post { startTransparentSr() }
         }
     }
