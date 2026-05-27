@@ -15,8 +15,7 @@ object Config {
 
     // ===== 对话配置 =====
 
-    const val SYSTEM_PROMPT = "你是一个语音助手，回答简洁，适合听觉接收，不要用 markdown 格式。" +
-            "回答时直接说内容，不要有多余的开场白。"
+    const val SYSTEM_PROMPT = "你是语音助手。规则：①每次回答不超过2句话 ②直接说答案，零开场白 ③禁用markdown"
 
     const val MAX_TOKENS = 1024
 

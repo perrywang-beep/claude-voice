@@ -50,7 +50,7 @@ class VoiceService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // 提示音超时兜底：3 秒内 TTS 没回调就直接启动 SR
+    // 提示音超时兜底
     private val greetingTimeoutRunnable = Runnable {
         if (state == State.LISTENING) {
             Log.w(TAG, "提示音超时，直接启动 SR")
@@ -64,10 +64,16 @@ class VoiceService : Service() {
                 Config.ACTION_TRIGGER_VOICE,
                 ACTION_MANUAL_TRIGGER       -> onTrigger()
                 Config.ACTION_CLEAR_CONTEXT -> onClearContext()
+
                 TransparentVoiceActivity.ACTION_VOICE_RESULT -> {
                     val text = intent.getStringExtra(TransparentVoiceActivity.EXTRA_RESULT) ?: ""
                     Log.d(TAG, "SR 结果: \"$text\"")
-                    if (text.isBlank()) resetToIdle() else sendToArk(text)
+                    if (text.isBlank()) {
+                        // 没听到说话 → 结束本轮持续对话
+                        resetToIdle()
+                    } else {
+                        sendToArk(text)
+                    }
                 }
                 "com.example.claudevoice.SR_READY" -> {
                     try { vibrate(longArrayOf(0, 500)) } catch (_: Exception) {}
@@ -110,23 +116,36 @@ class VoiceService : Service() {
 
     fun onTrigger() {
         Log.d(TAG, "onTrigger, state=$state")
-        if (state != State.IDLE) return
-        startListening()
+        when (state) {
+            State.IDLE -> startListening()
+            State.PLAYING -> {
+                // 打断：立刻停 TTS，重新开始（带提示音）
+                Log.d(TAG, "打断 TTS，重新开始")
+                ttsPlayer.stop()
+                setState(State.IDLE)
+                startListening()
+            }
+            State.LISTENING, State.PROCESSING -> {
+                // 已在进行中，忽略
+                Log.d(TAG, "忽略触发，当前 state=$state")
+            }
+        }
     }
 
     private fun onClearContext() {
         history.clear()
         try { vibrate(VIB_CLEAR) } catch (_: Exception) {}
+        Log.d(TAG, "上下文已清除")
     }
 
     // ─── 状态机 ───────────────────────────────────────────────────
 
+    /** 首次触发：播提示音再监听 */
     private fun startListening() {
         setState(State.LISTENING)
         try { vibrate(VIB_START) } catch (_: Exception) {}
         updateNotification(State.LISTENING)
 
-        // 3 秒超时兜底
         mainHandler.postDelayed(greetingTimeoutRunnable, 3000)
 
         ttsPlayer.speak("需要什么帮助吗", object : TtsPlayer.Listener {
@@ -135,11 +154,19 @@ class VoiceService : Service() {
                 if (state == State.LISTENING) mainHandler.post { startTransparentSr() }
             }
             override fun onError(msg: String) {
-                Log.w(TAG, "提示音 TTS 失败: $msg，直接启 SR")
+                Log.w(TAG, "提示音失败: $msg")
                 mainHandler.removeCallbacks(greetingTimeoutRunnable)
                 if (state == State.LISTENING) mainHandler.post { startTransparentSr() }
             }
         })
+    }
+
+    /** 持续对话：不播提示音，直接监听 */
+    private fun continueListening() {
+        setState(State.LISTENING)
+        try { vibrate(VIB_START) } catch (_: Exception) {}
+        updateNotification(State.LISTENING)
+        mainHandler.post { startTransparentSr() }
     }
 
     private fun startTransparentSr() {
@@ -177,10 +204,15 @@ class VoiceService : Service() {
         setState(State.PLAYING)
         updateNotification(State.PLAYING)
         ttsPlayer.speak(text, object : TtsPlayer.Listener {
-            override fun onPlaybackFinished() = resetToIdle()
+            override fun onPlaybackFinished() {
+                if (state != State.PLAYING) return   // 已被打断，不处理
+                // 播完自动继续监听（持续对话）
+                mainHandler.postDelayed({ continueListening() }, 300)
+            }
             override fun onError(msg: String) {
+                if (state != State.PLAYING) return
                 Log.w(TAG, "回复 TTS 失败: $msg")
-                resetToIdle()
+                mainHandler.postDelayed({ continueListening() }, 300)
             }
         })
     }
