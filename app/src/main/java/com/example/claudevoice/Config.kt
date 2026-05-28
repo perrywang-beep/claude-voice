@@ -50,4 +50,11 @@ object Config {
     const val TTS_CLUSTER = "volcano_tts"
     const val TTS_VOICE   = "BV001_streaming"   // 标准女声，免费
     const val TTS_URL     = "https://openspeech.bytedance.com/api/v1/tts"
+
+    // ===== 语音识别（ASR）=====
+    // 与 TTS 共用同一个 AppID/Token；需在控制台开通「语音识别」服务
+    // https://console.volcengine.com/speech/service/16
+    // cluster 名称在控制台「语音识别 → 我的接入点」中查看，通常为 volcengine_input_common
+    const val ASR_CLUSTER = "volcengine_input_common"
+    const val ASR_URL     = "https://openspeech.bytedance.com/api/v1/asr"
 }

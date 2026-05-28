@@ -23,8 +23,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.claudevoice.Config
 import com.example.claudevoice.MainActivity
-import com.example.claudevoice.TransparentVoiceActivity
 import com.example.claudevoice.api.VolcengineArkClient
+import com.example.claudevoice.api.VolcengineAsrClient
+import com.example.claudevoice.audio.AudioRecorder
 import com.example.claudevoice.audio.TtsPlayer
 import com.example.claudevoice.model.ConversationHistory
 import kotlinx.coroutines.CoroutineScope
@@ -44,24 +45,18 @@ class VoiceService : Service() {
 
     enum class State { IDLE, LISTENING, PROCESSING, PLAYING }
     @Volatile private var state = State.IDLE
-    // 每次 startListening() 递增，用于作废旧的 TTS 回调，防止重复启动 SR
-    @Volatile private var srGeneration = 0
 
-    private lateinit var ttsPlayer: TtsPlayer
-    private val arkClient   = VolcengineArkClient()
+    private lateinit var ttsPlayer:    TtsPlayer
+    private lateinit var audioRecorder: AudioRecorder
+    private val asrClient  = VolcengineAsrClient()
+    private val arkClient  = VolcengineArkClient()
     private var mediaSession: MediaSession? = null
-    private val history     = ConversationHistory()
-    private val scope       = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val history    = ConversationHistory()
+    private val scope      = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeLock:  PowerManager.WakeLock? = null
 
-    // 提示音超时兜底
-    private val greetingTimeoutRunnable = Runnable {
-        if (state == State.LISTENING) {
-            Log.w(TAG, "提示音超时，直接启动 SR")
-            startTransparentSr()
-        }
-    }
+    // ─── 广播接收 ─────────────────────────────────────────────────
 
     private val triggerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -69,20 +64,6 @@ class VoiceService : Service() {
                 Config.ACTION_TRIGGER_VOICE,
                 ACTION_MANUAL_TRIGGER       -> onTrigger()
                 Config.ACTION_CLEAR_CONTEXT -> onClearContext()
-
-                TransparentVoiceActivity.ACTION_VOICE_RESULT -> {
-                    val text = intent.getStringExtra(TransparentVoiceActivity.EXTRA_RESULT) ?: ""
-                    Log.d(TAG, "SR 结果: \"$text\"")
-                    if (text.isBlank()) {
-                        // 没听到说话 → 结束本轮持续对话
-                        resetToIdle()
-                    } else {
-                        sendToArk(text)
-                    }
-                }
-                "com.example.claudevoice.SR_READY" -> {
-                    try { vibrate(longArrayOf(0, 500)) } catch (_: Exception) {}
-                }
             }
         }
     }
@@ -97,10 +78,11 @@ class VoiceService : Service() {
         try { startForeground(Config.NOTIFICATION_ID, buildNotification(State.IDLE)) }
         catch (e: Exception) { Log.e(TAG, "startForeground: $e") }
 
-        try { ttsPlayer = TtsPlayer(this) } catch (e: Exception) { Log.e(TAG, "TtsPlayer: $e") }
-        try { acquireWakeLock() }         catch (e: Exception) { Log.e(TAG, "WakeLock: $e") }
-        try { registerTriggerReceiver() } catch (e: Exception) { Log.e(TAG, "Receiver: $e") }
-        try { setupMediaSession() }       catch (e: Exception) { Log.e(TAG, "MediaSession: $e") }
+        try { ttsPlayer     = TtsPlayer(this)   } catch (e: Exception) { Log.e(TAG, "TtsPlayer: $e") }
+        try { audioRecorder = AudioRecorder()   } catch (e: Exception) { Log.e(TAG, "AudioRecorder: $e") }
+        try { acquireWakeLock()                 } catch (e: Exception) { Log.e(TAG, "WakeLock: $e") }
+        try { registerTriggerReceiver()         } catch (e: Exception) { Log.e(TAG, "Receiver: $e") }
+        try { setupMediaSession()               } catch (e: Exception) { Log.e(TAG, "MediaSession: $e") }
 
         try { vibrate(VIB_START) } catch (e: Exception) { Log.e(TAG, "vibrate: $e") }
         Log.d(TAG, "onCreate 完成")
@@ -112,47 +94,38 @@ class VoiceService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         mainHandler.removeCallbacksAndMessages(null)
-        try { ttsPlayer.release() }               catch (_: Exception) {}
-        try { wakeLock?.release() }               catch (_: Exception) {}
+        try { audioRecorder.stop()              } catch (_: Exception) {}
+        try { ttsPlayer.release()               } catch (_: Exception) {}
+        try { wakeLock?.release()               } catch (_: Exception) {}
         try { unregisterReceiver(triggerReceiver) } catch (_: Exception) {}
-        try { mediaSession?.release() }           catch (_: Exception) {}
+        try { mediaSession?.release()           } catch (_: Exception) {}
         Log.d(TAG, "onDestroy")
     }
 
     // ─── 触发 ─────────────────────────────────────────────────────
 
     fun onTrigger() {
-        Log.d(TAG, "onTrigger, state=$state")
+        Log.d(TAG, "onTrigger state=$state")
         when (state) {
             State.IDLE -> startListening()
 
             State.PLAYING -> {
-                // 打断 TTS → 直接开始监听，不播提示音
-                Log.d(TAG, "打断 TTS，跳过提示音直接监听")
+                // 打断 TTS → 直接录音（不播提示音）
+                Log.d(TAG, "打断 TTS，直接监听")
                 ttsPlayer.stop()
-                srGeneration++      // 作废 continueListening 可能残留的回调
-                setState(State.LISTENING)
-                updateNotification(State.LISTENING)
-                try { vibrate(VIB_START) } catch (_: Exception) {}
-                mainHandler.post { startTransparentSr() }
+                beginRecordingCycle(withGreeting = false)
             }
 
             State.LISTENING -> {
-                // 打断提示音或正在进行的 SR → 取消旧 SR，立刻重新监听
-                Log.d(TAG, "打断 LISTENING，取消旧 SR 并重新监听")
+                // 重新开始：停当前录音/提示音，重新录
+                Log.d(TAG, "重新开始监听")
                 ttsPlayer.stop()
-                mainHandler.removeCallbacks(greetingTimeoutRunnable)
-                srGeneration++      // 作废旧 TTS 回调（startListening 捕获的 myGen 会失配）
-                sendBroadcast(Intent(TransparentVoiceActivity.ACTION_CANCEL_SR)
-                    .apply { setPackage(packageName) })
-                setState(State.LISTENING)
-                updateNotification(State.LISTENING)
-                try { vibrate(VIB_START) } catch (_: Exception) {}
-                mainHandler.post { startTransparentSr() }
+                audioRecorder.stop()
+                // 等 AudioRecord 完全释放（约 50ms），再开新实例
+                mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 80)
             }
 
             State.PROCESSING -> {
-                // LLM 请求中，忽略（暂不支持打断）
                 Log.d(TAG, "PROCESSING 中，忽略触发")
             }
         }
@@ -166,56 +139,89 @@ class VoiceService : Service() {
 
     // ─── 状态机 ───────────────────────────────────────────────────
 
-    /** 首次触发：播提示音再监听 */
-    private fun startListening() {
-        val myGen = ++srGeneration      // 捕获本次会话编号
+    /**
+     * 进入 LISTENING 状态。
+     * withGreeting=true  → 先播"需要什么帮助吗"再录音（首次触发）
+     * withGreeting=false → 直接录音（打断或持续对话）
+     */
+    private fun beginRecordingCycle(withGreeting: Boolean) {
         setState(State.LISTENING)
-        try { vibrate(VIB_START) } catch (_: Exception) {}
         updateNotification(State.LISTENING)
+        try { vibrate(VIB_START) } catch (_: Exception) {}
 
-        mainHandler.postDelayed(greetingTimeoutRunnable, 3000)
+        if (withGreeting) {
+            ttsPlayer.speak("需要什么帮助吗", object : TtsPlayer.Listener {
+                override fun onPlaybackFinished() {
+                    mainHandler.post {
+                        if (state == State.LISTENING && !audioRecorder.isRecording)
+                            startAudioRecording()
+                    }
+                }
+                override fun onError(msg: String) {
+                    Log.w(TAG, "提示音失败: $msg")
+                    mainHandler.post {
+                        if (state == State.LISTENING && !audioRecorder.isRecording)
+                            startAudioRecording()
+                    }
+                }
+            })
+            // 3 秒超时兜底（提示音通常不超过 2 秒）
+            mainHandler.postDelayed({
+                if (state == State.LISTENING && !audioRecorder.isRecording) {
+                    Log.w(TAG, "提示音超时，直接录音")
+                    startAudioRecording()
+                }
+            }, 3_000)
+        } else {
+            startAudioRecording()
+        }
+    }
 
-        ttsPlayer.speak("需要什么帮助吗", object : TtsPlayer.Listener {
-            override fun onPlaybackFinished() {
-                mainHandler.removeCallbacks(greetingTimeoutRunnable)
-                // 只有当会话未被中断时才启动 SR
-                mainHandler.post {
-                    if (state == State.LISTENING && srGeneration == myGen) startTransparentSr()
+    /** 开始使用 AudioRecord 采集麦克风输入 */
+    private fun startAudioRecording() {
+        Log.d(TAG, "startAudioRecording")
+        audioRecorder.start(object : AudioRecorder.Listener {
+
+            override fun onReady() {
+                Log.d(TAG, "麦克风就绪，等待说话")
+                try { vibrate(longArrayOf(0, 500)) } catch (_: Exception) {}
+            }
+
+            override fun onResult(pcm: ByteArray) {
+                Log.d(TAG, "录音完成 ${pcm.size}B，送 ASR")
+                setState(State.PROCESSING)
+                updateNotification(State.PROCESSING)
+
+                scope.launch {
+                    val text = asrClient.recognize(pcm)
+                    mainHandler.post {
+                        if (text.isNullOrBlank()) {
+                            Log.d(TAG, "ASR 无结果")
+                            resetToIdle()
+                        } else {
+                            Log.d(TAG, "ASR 识别: \"$text\"")
+                            sendToArk(text)
+                        }
+                    }
                 }
             }
+
+            override fun onSilence() {
+                Log.d(TAG, "未检测到语音，回到待机")
+                mainHandler.post { resetToIdle() }
+            }
+
             override fun onError(msg: String) {
-                Log.w(TAG, "提示音失败: $msg")
-                mainHandler.removeCallbacks(greetingTimeoutRunnable)
-                mainHandler.post {
-                    if (state == State.LISTENING && srGeneration == myGen) startTransparentSr()
-                }
+                Log.e(TAG, "录音错误: $msg")
+                mainHandler.post { resetToIdle() }
             }
         })
     }
 
-    /** 持续对话：不播提示音，直接监听 */
-    private fun continueListening() {
-        setState(State.LISTENING)
-        try { vibrate(VIB_START) } catch (_: Exception) {}
-        updateNotification(State.LISTENING)
-        mainHandler.post { startTransparentSr() }
-    }
-
-    private fun startTransparentSr() {
-        try {
-            startActivity(Intent(this, TransparentVoiceActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-            Log.d(TAG, "已启动 SR Activity")
-        } catch (e: Exception) {
-            Log.e(TAG, "启动 SR 失败: $e")
-            resetToIdle()
-        }
-    }
+    private fun startListening() = beginRecordingCycle(withGreeting = true)
 
     private fun sendToArk(userText: String) {
-        setState(State.PROCESSING)
-        updateNotification(State.PROCESSING)
+        // state 已是 PROCESSING（由 onResult 设置）
         scope.launch {
             arkClient.chat(userText, history, object : VolcengineArkClient.StreamListener {
                 override fun onToken(token: String) {}
@@ -226,7 +232,7 @@ class VoiceService : Service() {
                 }
                 override fun onError(message: String) {
                     Log.e(TAG, "ARK: $message")
-                    resetToIdle()
+                    mainHandler.post { resetToIdle() }
                 }
             })
         }
@@ -237,14 +243,14 @@ class VoiceService : Service() {
         updateNotification(State.PLAYING)
         ttsPlayer.speak(text, object : TtsPlayer.Listener {
             override fun onPlaybackFinished() {
-                if (state != State.PLAYING) return   // 已被打断，不处理
-                // 播完自动继续监听（持续对话）
-                mainHandler.postDelayed({ continueListening() }, 300)
+                if (state != State.PLAYING) return
+                // 播完自动进入下一轮（不播提示音）
+                mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 300)
             }
             override fun onError(msg: String) {
                 if (state != State.PLAYING) return
                 Log.w(TAG, "回复 TTS 失败: $msg")
-                mainHandler.postDelayed({ continueListening() }, 300)
+                mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 300)
             }
         })
     }
@@ -332,7 +338,7 @@ class VoiceService : Service() {
                     if (event.action == KeyEvent.ACTION_UP &&
                         (code == KeyEvent.KEYCODE_HEADSETHOOK ||
                          code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
-                         code == KeyEvent.KEYCODE_MEDIA_PLAY ||      // OPPO Enco X2 发 126
+                         code == KeyEvent.KEYCODE_MEDIA_PLAY ||
                          code == KeyEvent.KEYCODE_MEDIA_NEXT ||
                          code == KeyEvent.KEYCODE_MEDIA_PREVIOUS)) {
                         Log.d(TAG, "耳机键触发")
@@ -357,8 +363,6 @@ class VoiceService : Service() {
             addAction(Config.ACTION_TRIGGER_VOICE)
             addAction(Config.ACTION_CLEAR_CONTEXT)
             addAction(ACTION_MANUAL_TRIGGER)
-            addAction(TransparentVoiceActivity.ACTION_VOICE_RESULT)
-            addAction("com.example.claudevoice.SR_READY")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(triggerReceiver, filter, RECEIVER_NOT_EXPORTED)
