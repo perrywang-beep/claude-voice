@@ -21,6 +21,9 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import com.example.claudevoice.Config
 import com.example.claudevoice.MainActivity
 import com.example.claudevoice.api.VolcengineArkClient
@@ -55,6 +58,10 @@ class VoiceService : Service() {
     private val scope      = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
     private var wakeLock:  PowerManager.WakeLock? = null
+
+    // Barge-in：TTS 播放时监听用户说话，自动打断
+    private var bargeInThread: Thread? = null
+    private val BARGE_IN_THRESHOLD = 900.0   // RMS 阈值；用耳机时 TTS 回声极小，可适当调低
 
     // ─── 广播接收 ─────────────────────────────────────────────────
 
@@ -110,8 +117,8 @@ class VoiceService : Service() {
             State.IDLE -> startListening()
 
             State.PLAYING -> {
-                // 打断 TTS → 直接录音（不播提示音）
-                Log.d(TAG, "打断 TTS，直接监听")
+                Log.d(TAG, "手动打断 TTS")
+                stopBargeInMonitor()
                 ttsPlayer.stop()
                 beginRecordingCycle(withGreeting = false)
             }
@@ -241,13 +248,15 @@ class VoiceService : Service() {
     private fun playResponse(text: String) {
         setState(State.PLAYING)
         updateNotification(State.PLAYING)
+        startBargeInMonitor()
         ttsPlayer.speak(text, object : TtsPlayer.Listener {
             override fun onPlaybackFinished() {
+                stopBargeInMonitor()
                 if (state != State.PLAYING) return
-                // 播完自动进入下一轮（不播提示音）
                 mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 300)
             }
             override fun onError(msg: String) {
+                stopBargeInMonitor()
                 if (state != State.PLAYING) return
                 Log.w(TAG, "回复 TTS 失败: $msg")
                 mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 300)
@@ -255,7 +264,53 @@ class VoiceService : Service() {
         })
     }
 
+    // ─── Barge-in 监听 ────────────────────────────────────────────
+
+    private fun startBargeInMonitor() {
+        bargeInThread?.interrupt()
+        bargeInThread = Thread({
+            val minBuf = AudioRecord.getMinBufferSize(
+                16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            // VOICE_COMMUNICATION 开启硬件回声消除，过滤掉 TTS 的声音
+            val ar = try {
+                AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    16000, AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
+            } catch (e: Exception) { Log.w(TAG, "BargeIn init: $e"); return@Thread }
+
+            if (ar.state != AudioRecord.STATE_INITIALIZED) { ar.release(); return@Thread }
+            ar.startRecording()
+            Log.d(TAG, "Barge-in 监听启动")
+
+            val buf = ShortArray(320)   // 20ms/chunk
+            try {
+                while (!Thread.currentThread().isInterrupted && state == State.PLAYING) {
+                    val read = ar.read(buf, 0, buf.size)
+                    if (read <= 0) continue
+                    var sum = 0.0
+                    for (i in 0 until read) sum += buf[i].toDouble() * buf[i]
+                    val rms = Math.sqrt(sum / read)
+                    if (rms > BARGE_IN_THRESHOLD) {
+                        Log.d(TAG, "Barge-in 触发 rms=${"%.0f".format(rms)}")
+                        mainHandler.post { if (state == State.PLAYING) onTrigger() }
+                        break
+                    }
+                }
+            } finally {
+                try { ar.stop(); ar.release() } catch (_: Exception) {}
+                Log.d(TAG, "Barge-in 监听停止")
+            }
+        }, "BargeIn").also { it.isDaemon = true }
+        bargeInThread!!.start()
+    }
+
+    private fun stopBargeInMonitor() {
+        bargeInThread?.interrupt()
+        bargeInThread = null
+    }
+
     private fun resetToIdle() {
+        stopBargeInMonitor()
         setState(State.IDLE)
         updateNotification(State.IDLE)
         try { vibrate(VIB_END) } catch (_: Exception) {}
