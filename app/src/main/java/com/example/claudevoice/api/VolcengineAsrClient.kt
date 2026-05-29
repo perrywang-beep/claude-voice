@@ -49,6 +49,7 @@ class VolcengineAsrClient {
                 put("bits",        16)
                 put("channel",     1)
                 put("codec",       "raw")
+                put("data",        audioB64)   // 音频 base64 在 audio.data，不是顶层
             })
             put("request", JSONObject().apply {
                 put("reqid",           UUID.randomUUID().toString())
@@ -56,7 +57,6 @@ class VolcengineAsrClient {
                 put("nbest",           1)
                 put("show_utterances", false)
             })
-            put("audio_data", audioB64)
         }.toString()
 
         val req = Request.Builder()
