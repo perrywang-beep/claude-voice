@@ -53,8 +53,7 @@ object Config {
     const val TTS_APP_ID  = "7696822959"
     const val TTS_TOKEN   = "PDlZu0111x_8YhbchuPjvnQBwjnFhSJ0"
     const val TTS_CLUSTER = "volcano_tts"
-    const val TTS_VOICE   = "BV001_streaming"   // 暂时用女声（免费可用）；男声见下方注释
-    // 如需男声，去火山引擎控制台 → 语音合成 → 音色列表，找到已开通的男声复制 ID 填这里
+    const val TTS_VOICE   = "BV002_streaming"   // 标准男声
     const val TTS_SPEED   = 1.15                // 语速倍率，1.0=正常，>1=加速
     const val TTS_URL     = "https://openspeech.bytedance.com/api/v1/tts"
 
