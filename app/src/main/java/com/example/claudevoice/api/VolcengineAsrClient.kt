@@ -80,9 +80,8 @@ class VolcengineAsrClient {
                     return null
                 }
 
-                // 响应结构: { code:1000, resp:{ result:[{text:"..."}] } }
-                json.optJSONObject("resp")
-                    ?.optJSONArray("result")
+                // 响应结构: { code:1000, result:[{text:"..."}] }
+                json.optJSONArray("result")
                     ?.optJSONObject(0)
                     ?.optString("text")
                     ?.takeIf { it.isNotBlank() }
