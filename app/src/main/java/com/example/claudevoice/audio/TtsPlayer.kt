@@ -75,7 +75,7 @@ class TtsPlayer(private val context: Context) {
             put("audio", JSONObject().apply {
                 put("voice_type",   Config.TTS_VOICE)
                 put("encoding",     "mp3")
-                put("speed_ratio",  1.0)
+                put("speed_ratio",  Config.TTS_SPEED)
                 put("volume_ratio", 1.0)
                 put("pitch_ratio",  1.0)
             })

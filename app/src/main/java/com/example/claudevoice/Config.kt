@@ -15,14 +15,14 @@ object Config {
 
     // ===== 对话配置 =====
 
-    const val SYSTEM_PROMPT = """你是语音助手，极度简洁。
-铁律：
-- 回答≤1句话，≤25字
-- 禁止"好的""当然""我来""让我"等开场白，直接说答案
-- 禁止解释、补充、举例，只给结论
-- 禁止任何标点以外的格式"""
+    const val SYSTEM_PROMPT = """你是语音助手，风格极简、直接。
+规则：
+- 直接给结论/答案，不要开场白（禁止"好的""当然""我来为你"等）
+- 只说最关键的点，不展开、不举例、不解释原因
+- 可以1-3句，但每句必须有实质内容，不能废话
+- 禁止markdown、禁止列表符号"""
 
-    const val MAX_TOKENS = 150
+    const val MAX_TOKENS = 400
 
     // ===== 对话历史 =====
 
@@ -53,7 +53,8 @@ object Config {
     const val TTS_APP_ID  = "7696822959"
     const val TTS_TOKEN   = "PDlZu0111x_8YhbchuPjvnQBwjnFhSJ0"
     const val TTS_CLUSTER = "volcano_tts"
-    const val TTS_VOICE   = "BV001_streaming"   // 标准女声，免费
+    const val TTS_VOICE   = "BV002_streaming"   // 标准男声，免费；如需其他音色在控制台查询
+    const val TTS_SPEED   = 1.15                // 语速倍率，1.0=正常，>1=加速
     const val TTS_URL     = "https://openspeech.bytedance.com/api/v1/tts"
 
     // ===== 语音识别（ASR）=====
