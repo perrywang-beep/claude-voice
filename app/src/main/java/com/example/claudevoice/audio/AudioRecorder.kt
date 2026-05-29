@@ -26,7 +26,7 @@ class AudioRecorder {
         private const val CHUNK_SAMPLES  = 320         // 20 ms per chunk
         private const val RMS_THRESHOLD  = 600.0       // 振幅阈值（0-32767）
         private const val WAIT_SPEECH_MS = 7_000L      // 最长等待语音开始
-        private const val SILENCE_END_MS = 1_500L      // 语音后静音多久算结束
+        private const val SILENCE_END_MS = 800L         // 语音后静音多久算结束
         private const val MAX_SPEECH_MS  = 8_000L      // 单次最长录音
         private const val MIN_SPEECH_MS  = 300L        // 低于此时长视为无效
     }

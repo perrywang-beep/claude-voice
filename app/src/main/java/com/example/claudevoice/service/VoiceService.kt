@@ -61,7 +61,13 @@ class VoiceService : Service() {
 
     // Barge-in：TTS 播放时监听用户说话，自动打断
     private var bargeInThread: Thread? = null
-    private val BARGE_IN_THRESHOLD = 900.0   // RMS 阈值；用耳机时 TTS 回声极小，可适当调低
+    private val BARGE_IN_THRESHOLD = 1500.0  // RMS 阈值；用耳机时 TTS 回声极小，可适当调低
+
+    // ─── 流式 TTS 状态（仅主线程读写，currentTurn 除外）──────────
+    @Volatile private var currentTurn  = 0    // 每次新对话轮次自增，用于取消旧回调
+    private val ttsQueue               = ArrayDeque<String>()
+    private var ttsPlaying             = false
+    private var streamingComplete      = false
 
     // ─── 广播接收 ─────────────────────────────────────────────────
 
@@ -118,6 +124,8 @@ class VoiceService : Service() {
 
             State.PLAYING -> {
                 Log.d(TAG, "手动打断 TTS")
+                currentTurn++
+                ttsQueue.clear(); ttsPlaying = false; streamingComplete = false
                 stopBargeInMonitor()
                 ttsPlayer.stop()
                 beginRecordingCycle(withGreeting = false)
@@ -126,6 +134,8 @@ class VoiceService : Service() {
             State.LISTENING -> {
                 // 重新开始：停当前录音/提示音，重新录
                 Log.d(TAG, "重新开始监听")
+                currentTurn++
+                ttsQueue.clear(); ttsPlaying = false; streamingComplete = false
                 ttsPlayer.stop()
                 audioRecorder.stop()
                 // 等 AudioRecord 完全释放（约 50ms），再开新实例
@@ -227,41 +237,108 @@ class VoiceService : Service() {
 
     private fun startListening() = beginRecordingCycle(withGreeting = true)
 
+    /**
+     * 把 LLM token 流拆句，每句完成立即送 TTS，不等全文。
+     * 句界标点：。！？!?；;
+     */
     private fun sendToArk(userText: String) {
         // state 已是 PROCESSING（由 onResult 设置）
+        currentTurn++
+        val myTurn = currentTurn
+        ttsQueue.clear(); ttsPlaying = false; streamingComplete = false
+
         scope.launch {
+            val buf = StringBuilder()   // 仅在此协程线程读写
+
             arkClient.chat(userText, history, object : VolcengineArkClient.StreamListener {
-                override fun onToken(token: String) {}
+                override fun onToken(token: String) {
+                    if (myTurn != currentTurn) return
+                    buf.append(token)
+                    val pos = findSentenceBoundary(buf.toString())
+                    if (pos > 0) {
+                        val sentence = buf.substring(0, pos).trim()
+                        buf.delete(0, pos)
+                        if (sentence.isNotBlank()) {
+                            mainHandler.post {
+                                if (myTurn == currentTurn) enqueueAndPlay(sentence, myTurn)
+                            }
+                        }
+                    }
+                }
                 override fun onComplete(fullText: String) {
+                    if (myTurn != currentTurn) return
                     history.addUserMessage(userText)
                     history.addAssistantMessage(fullText)
-                    playResponse(fullText)
+                    val remaining = buf.toString().trim()
+                    mainHandler.post {
+                        if (myTurn != currentTurn) return@post
+                        if (remaining.isNotBlank()) ttsQueue.addLast(remaining)
+                        streamingComplete = true
+                        if (!ttsPlaying) playNextOrFinish(myTurn)
+                    }
                 }
                 override fun onError(message: String) {
                     Log.e(TAG, "ARK: $message")
-                    mainHandler.post { resetToIdle() }
+                    mainHandler.post { if (myTurn == currentTurn) resetToIdle() }
                 }
             })
         }
     }
 
-    private fun playResponse(text: String) {
-        setState(State.PLAYING)
-        updateNotification(State.PLAYING)
-        startBargeInMonitor()
-        ttsPlayer.speak(text, object : TtsPlayer.Listener {
-            override fun onPlaybackFinished() {
-                stopBargeInMonitor()
-                if (state != State.PLAYING) return
-                mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 300)
+    /** 返回第一个句界标点之后的位置，找不到返回 -1 */
+    private fun findSentenceBoundary(text: String): Int {
+        for (i in text.indices) {
+            if (text[i] in "。！？!?；;") return i + 1
+        }
+        return -1
+    }
+
+    /** 将句子加入队列，如果当前没有在播就立即开始（主线程调用）*/
+    private fun enqueueAndPlay(sentence: String, turn: Int) {
+        ttsQueue.addLast(sentence)
+        if (!ttsPlaying) playNextOrFinish(turn)
+    }
+
+    /** 播队头一句；队空且流已完成则切回录音（主线程调用）*/
+    private fun playNextOrFinish(turn: Int) {
+        if (turn != currentTurn) return
+
+        if (ttsQueue.isNotEmpty()) {
+            val sentence = ttsQueue.removeFirst()
+            ttsPlaying = true
+            // 首句时切换到 PLAYING 状态并启动 barge-in
+            if (state != State.PLAYING) {
+                setState(State.PLAYING)
+                updateNotification(State.PLAYING)
+                startBargeInMonitor()
             }
-            override fun onError(msg: String) {
-                stopBargeInMonitor()
-                if (state != State.PLAYING) return
-                Log.w(TAG, "回复 TTS 失败: $msg")
-                mainHandler.postDelayed({ beginRecordingCycle(withGreeting = false) }, 300)
+            ttsPlayer.speak(sentence, object : TtsPlayer.Listener {
+                override fun onPlaybackFinished() {
+                    mainHandler.post {
+                        if (turn != currentTurn) return@post
+                        ttsPlaying = false
+                        playNextOrFinish(turn)
+                    }
+                }
+                override fun onError(msg: String) {
+                    Log.w(TAG, "TTS 句子失败: $msg")
+                    mainHandler.post {
+                        if (turn != currentTurn) return@post
+                        ttsPlaying = false
+                        playNextOrFinish(turn)
+                    }
+                }
+            })
+        } else if (streamingComplete) {
+            // 所有句子播完，流也结束了 → 继续监听
+            stopBargeInMonitor()
+            if (state == State.PLAYING) {
+                mainHandler.postDelayed({
+                    if (turn == currentTurn) beginRecordingCycle(withGreeting = false)
+                }, 300)
             }
-        })
+        }
+        // else：队列空但流未结束 → 等待更多 token
     }
 
     // ─── Barge-in 监听 ────────────────────────────────────────────
@@ -310,6 +387,8 @@ class VoiceService : Service() {
     }
 
     private fun resetToIdle() {
+        currentTurn++
+        ttsQueue.clear(); ttsPlaying = false; streamingComplete = false
         stopBargeInMonitor()
         setState(State.IDLE)
         updateNotification(State.IDLE)
