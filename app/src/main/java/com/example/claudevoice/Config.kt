@@ -15,9 +15,14 @@ object Config {
 
     // ===== 对话配置 =====
 
-    const val SYSTEM_PROMPT = "你是语音助手。规则：①每次回答不超过2句话 ②直接说答案，零开场白 ③禁用markdown"
+    const val SYSTEM_PROMPT = """你是语音助手，极度简洁。
+铁律：
+- 回答≤1句话，≤25字
+- 禁止"好的""当然""我来""让我"等开场白，直接说答案
+- 禁止解释、补充、举例，只给结论
+- 禁止任何标点以外的格式"""
 
-    const val MAX_TOKENS = 1024
+    const val MAX_TOKENS = 150
 
     // ===== 对话历史 =====
 
